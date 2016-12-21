@@ -19,13 +19,11 @@ import (
 	"github.com/golang/protobuf/proto"
 	"github.com/gorilla/websocket"
 	"github.com/laincloud/entry/message"
-	lainlet "github.com/laincloud/lainlet/client"
 	"github.com/mijia/sweb/log"
 )
 
 type EntryServer struct {
 	dockerClient  *docker.Client
-	lainletClient *lainlet.Client
 	httpClient    *http.Client
 }
 
@@ -92,7 +90,6 @@ func StartServer(port, endpoint string) {
 		} else {
 			server = &EntryServer{
 				dockerClient:  client,
-				lainletClient: lainlet.New(net.JoinHostPort("lainlet.lain", os.Getenv("LAINLET_PORT"))),
 				httpClient: &http.Client{
 					Timeout: 4 * time.Second,
 				},
@@ -232,13 +229,9 @@ func (server *EntryServer) prepare(w http.ResponseWriter, r *http.Request) (*web
 		return ws, "", err
 	}
 
-	var accessToken, appName, procName, instanceNo string
-	msgMarshaller, _ := getMarshalers(r)
+	var containerID string
 	if !isViaWeb {
-		accessToken = r.Header.Get("access-token")
-		appName = r.Header.Get("app-name")
-		procName = r.Header.Get("proc-name")
-		instanceNo = r.Header.Get("instance-no")
+		containerID = r.Header.Get("container_id")
 	} else {
 		_, msgData, err := ws.ReadMessage()
 		if err != nil {
@@ -247,27 +240,10 @@ func (server *EntryServer) prepare(w http.ResponseWriter, r *http.Request) (*web
 		}
 		msg := make(map[string]string)
 		json.Unmarshal(msgData, &msg)
-		accessToken = msg["access_token"]
-		appName = msg["app_name"]
-		procName = msg["proc_name"]
-		instanceNo = msg["instance_no"]
+		containerID = msg["container_id"]
 	}
 
-	var containerID string
-	log.Infof("A user wants to enter %s[%s-%s]", appName, procName, instanceNo)
-
-	if err = server.auth(accessToken, appName); err != nil {
-		errMsg := fmt.Sprintf(errMsgTemplate, "Authorization failed.")
-		log.Errorf("Authorization failed: %s", err.Error())
-		server.sendCloseMessage(ws, []byte(errMsg), msgMarshaller)
-		return ws, containerID, errAuthFailed
-	}
-
-	if containerID, err = server.getContainerID(appName, procName, instanceNo); err != nil {
-		errMsg := fmt.Sprintf(errMsgTemplate, "Container is not found.")
-		log.Errorf("Find container %s[%s-%s] error: %s", appName, procName, instanceNo, err.Error())
-		server.sendCloseMessage(ws, []byte(errMsg), msgMarshaller)
-	}
+	log.Infof("A user wants to enter %s", containerID)
 	return ws, containerID, err
 }
 
@@ -362,29 +338,6 @@ func (server *EntryServer) handleAliveDetection(ws *websocket.Conn, isStop chan 
 
 // auth authorizes whether the client with the token has the right to access the application
 func (server *EntryServer) auth(token, appName string) error {
-	var (
-		data []byte
-		err  error
-	)
-	if data, err = server.lainletClient.Get("/v2/configwatcher?target=auth/console", 2*time.Second); err != nil {
-		return err
-	}
-	authDataMap := make(map[string]string)
-	if err = json.Unmarshal(data, &authDataMap); err != nil {
-		return err
-	}
-	if authStr, exist := authDataMap["auth/console"]; exist {
-		c := ConsoleAuthConf{}
-		if err = json.Unmarshal([]byte(authStr), &c); err != nil {
-			return err
-		}
-		if c.Type == "lain-sso" {
-			authURL := fmt.Sprintf("http://console.%s/api/v1/repos/%s/roles/", lainDomain, appName)
-			return server.validateConsoleRole(authURL, token)
-		}
-		return errAuthNotSupported
-	}
-
 	return nil
 }
 
@@ -417,30 +370,7 @@ func (server *EntryServer) validateConsoleRole(authURL, token string) error {
 }
 
 func (server *EntryServer) getContainerID(appName, procName, instanceNo string) (string, error) {
-	var (
-		data []byte
-		err  error
-	)
-	if data, err = server.lainletClient.Get("v2/coreinfowatcher?appname="+appName, 2*time.Second); err != nil {
-		return "", err
-	}
-	coreInfo := make(CoreInfo)
-	if err := json.Unmarshal(data, &coreInfo); err != nil {
-		return "", err
-	}
-	for procFullName, procInfo := range coreInfo {
-		curAppName, curProcName := getAppProcName(strings.Split(procFullName, "."))
-		if curProcName == procName && curAppName == appName {
-			for _, containerInfo := range procInfo.PodInfos {
-				if strconv.Itoa(containerInfo.InstanceNo) == instanceNo &&
-					len(containerInfo.Containers) > 0 &&
-					containerInfo.Containers[0].ContainerID != "" {
-					return containerInfo.Containers[0].ContainerID, nil
-				}
-			}
-		}
-	}
-	return "", errContainerNotfound
+	return instanceNo, nil
 }
 
 func (server *EntryServer) sendCloseMessage(ws *websocket.Conn, content []byte, msgMarshaller Marshaler) {
