@@ -11,6 +11,7 @@ setup(
     author='EricPai <ericpai94@hotmail.com>',
     version='2.2.0',
     packages=find_packages(),
+    scripts=['entryclient/entrycli.py'],
     include_package_data=True,
     install_requires=requirements,
 )
